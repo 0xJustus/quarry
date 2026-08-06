@@ -1,0 +1,22 @@
+# Default in-process broker catalog (M2 scaffold). Tools are advertised here;
+# their backing recipes + pins live in the toolcat catalog. Roles scope
+# visibility only — an empty roles list means every role sees the tool.
+tools:
+  - name: list_symbols
+    description: "List symbols in a binary (nm -C)."
+    roles: [exploit-dev, triage]
+    output_cap: 65536
+
+  - name: disassemble
+    description: "Disassemble a function or range (objdump -d)."
+    roles: [exploit-dev]
+    output_cap: 131072
+
+  - name: file_type
+    description: "Identify a file's type (file)."
+    # no roles ⇒ visible to every role
+
+  - name: strings_scan
+    description: "Extract printable strings from a blob."
+    roles: [triage]
+    output_cap: 32768

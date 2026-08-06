@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+    branches: [main, m1-implementation]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: go build / vet / test / race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+      - name: gofmt (no drift)
+        run: |
+          out=$(gofmt -l cmd internal)
+          if [ -n "$out" ]; then echo "gofmt drift in:"; echo "$out"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: go mod tidy (no diff)
+        run: go mod tidy -diff
+      - name: build
+        run: go build ./...
+      - name: test
+        run: go test ./...
+      - name: test -race
+        run: go test -race ./...

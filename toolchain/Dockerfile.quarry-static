@@ -1,0 +1,65 @@
+# quarry-static: the deep static-analysis layer quarry OWNS and PINS (Analysis Tool
+# Image "Static+"). An opt-in sidecar, not baked into the lean fuzzing base: cppcheck
+# (built from a PINNED source tag+commit) + clang's static analyzer / clang-tidy (the
+# pinned LLVM apt series, same clang line quarry-fuzz pins). Surfaced on request via the
+# broker (design/Tool Provisioning.md — surface, don't install mid-session).
+#
+# Version-pinned for a reproducible campaign, mirroring Dockerfile.quarry-fuzz: base OS by
+# digest, LLVM by apt version, cppcheck by git tag + verified commit. The produced content
+# hash is recorded by `quarry toolctl populate` (manifest.yaml `pin:`), NOT baked here.
+
+# --- base: pinned Ubuntu 24.04 (noble) ------------------------------------------------------
+# Pinned by digest at build time; the manifest passes the resolved --build-arg BASE_DIGEST.
+# The zero default is a sentinel: an unresolved base must fail loudly, never build unpinned.
+ARG BASE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
+FROM ubuntu:24.04@${BASE_DIGEST} AS quarry-static
+
+ENV DEBIAN_FRONTEND=noninteractive
+# clang-tidy + the clang static analyzer come from the same pinned LLVM series quarry-fuzz
+# uses (clang-tools carries clang-tidy/scan-build), so a static finding and a fuzz build
+# agree on the compiler line.
+ARG LLVM_VERSION=18
+ARG CPPCHECK_TAG=2.16.0
+# The exact cppcheck commit CPPCHECK_TAG points at, so a moved tag can never silently change
+# the build. 40 zeros = the not-yet-pinned sentinel: resolved + recorded on the first build
+# (see README.md), and the guard below skips verification while it is the sentinel.
+ARG CPPCHECK_COMMIT=0000000000000000000000000000000000000000
+
+# --- static-analysis toolchain --------------------------------------------------------------
+# clang-tidy / scan-build (clang static analyzer) from the pinned LLVM apt series, plus the
+# build tooling cppcheck's from-source build needs. Kept to the static layer only.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates git build-essential make cmake \
+      "clang-${LLVM_VERSION}" "clang-tools-${LLVM_VERSION}" "clang-tidy-${LLVM_VERSION}" \
+      python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make the pinned clang-tidy / scan-build the unversioned defaults the broker tool invokes.
+RUN for t in clang clang++ clang-tidy scan-build scan-view; do \
+      update-alternatives --install "/usr/bin/$t" "$t" "/usr/bin/$t-${LLVM_VERSION}" 100 2>/dev/null || true; \
+    done
+
+# --- cppcheck (pinned by tag + verified commit, built from source) --------------------------
+# Built from source rather than apt so QUARRY pins the analyzer version — the point of owning
+# the toolchain. MATCH=off keeps the human tag; the commit guard catches a moved tag.
+RUN git clone --depth 1 --branch "${CPPCHECK_TAG}" https://github.com/danmar/cppcheck /cppcheck-src \
+    && cd /cppcheck-src \
+    && got="$(git rev-parse HEAD)" \
+    && if [ "${CPPCHECK_COMMIT}" != "0000000000000000000000000000000000000000" ] && [ "${got}" != "${CPPCHECK_COMMIT}" ]; then \
+         echo "cppcheck commit mismatch: tag ${CPPCHECK_TAG} is ${got}, expected ${CPPCHECK_COMMIT}" >&2; exit 1; \
+       fi \
+    && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_MATCHCOMPILER=ON \
+    && cmake --build build -j "$(nproc)" \
+    && cmake --install build \
+    && cd / && rm -rf /cppcheck-src
+
+# Sanity: the CLIs the broker's static+ tools drive must be on PATH. Fails the build early if
+# an upstream rename breaks the contract the catalog relies on.
+RUN command -v cppcheck && command -v clang-tidy && command -v scan-build \
+    && cppcheck --version
+
+LABEL org.quarry.toolchain="quarry-static" \
+      org.quarry.cppcheck="cppcheck ${CPPCHECK_TAG}" \
+      org.quarry.llvm="clang-${LLVM_VERSION}"
+
+# No ENTRYPOINT: the broker supplies the full argv (cppcheck … / clang-tidy … / scan-build …).

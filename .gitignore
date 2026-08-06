@@ -1,0 +1,44 @@
+# OS
+.DS_Store
+
+# Obsidian editor state (personal / volatile) — not part of the shared repo
+.obsidian/
+
+# Go
+/bin/
+*.exe
+*.test
+*.out
+
+# quarry runtime state (datastore, per-run workspaces, client key)
+/.quarry/
+/.quarry-ws/
+/.quarry-home/
+testdata/**/vuln
+testdata/**/vuln_fixed
+
+# scratch
+*.tmp
+/quarry
+/quarry-vetd
+*.dSYM/
+
+# evaluation harness data (benchmark cases, corpora, targets, results) — local-only
+/bench/
+
+# populated tool library (content-addressed blobs) — built by `quarry toolctl populate`
+/toolchain/store/
+
+# agent worktrees (transient)
+.claude/worktrees/
+
+# Joern CPG project scratch (created in CWD by joern; the cpg glue confines it to a temp dir, this is belt-and-suspenders)
+workspace/
+
+# runtime audit logs from `quarry serve`/`call`
+quarry-audit.jsonl
+*.audit.jsonl
+
+# tests + fixtures live only on this machine — the repo is the consumer-facing product
+*_test.go
+testdata/

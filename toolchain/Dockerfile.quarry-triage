@@ -1,0 +1,54 @@
+# quarry-triage: the crash-triage / deterministic-replay layer quarry OWNS and PINS
+# (Analysis Tool Image "Triage+"). An opt-in sidecar: valgrind/memcheck (built from a
+# PINNED source tag+commit) to localize a memory error the oracle already witnessed.
+# Surfaced on request via the broker; the oracle stays the sole judge, triage is a lead.
+#
+# (rr — the other Triage+ tool the design names — needs host perf-counter access
+# (`perf_event_paranoid`) that the air-gapped, `--network none` run posture does not grant,
+# so it is NOT built into this layer; valgrind needs no such privilege and is the portable
+# default. rr can be added as a privileged host-side sidecar later — noted, not faked.)
+#
+# Version-pinned for reproducibility, mirroring Dockerfile.quarry-fuzz: base OS by digest,
+# valgrind by git tag + verified commit. The produced content hash is recorded by
+# `quarry toolctl populate` (manifest.yaml `pin:`), NOT baked here.
+
+# --- base: pinned Ubuntu 24.04 (noble) ------------------------------------------------------
+ARG BASE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
+FROM ubuntu:24.04@${BASE_DIGEST} AS quarry-triage
+
+ENV DEBIAN_FRONTEND=noninteractive
+# valgrind release tag (upstream uses VALGRIND_<maj>_<min>_<patch> tags). The commit the tag
+# points at is the pin that matters; 40 zeros = the not-yet-pinned sentinel resolved on the
+# first build (README.md), and the guard below skips verification while it is the sentinel.
+ARG VALGRIND_TAG=VALGRIND_3_24_0
+ARG VALGRIND_COMMIT=0000000000000000000000000000000000000000
+
+# --- triage toolchain -----------------------------------------------------------------------
+# The autotools chain valgrind's from-source build needs. Kept to the triage layer only.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates git build-essential make automake autoconf libtool \
+      python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- valgrind (pinned by tag + verified commit, built from source) --------------------------
+# Built from source rather than apt so QUARRY pins the version. Upstream git is on sourceware;
+# GitHub carries an official read-only mirror used here for a depth-1 clone.
+RUN git clone --depth 1 --branch "${VALGRIND_TAG}" https://github.com/tklengyel/valgrind /valgrind-src \
+    && cd /valgrind-src \
+    && got="$(git rev-parse HEAD)" \
+    && if [ "${VALGRIND_COMMIT}" != "0000000000000000000000000000000000000000" ] && [ "${got}" != "${VALGRIND_COMMIT}" ]; then \
+         echo "valgrind commit mismatch: tag ${VALGRIND_TAG} is ${got}, expected ${VALGRIND_COMMIT}" >&2; exit 1; \
+       fi \
+    && ./autogen.sh \
+    && ./configure --prefix=/usr/local \
+    && make -j "$(nproc)" \
+    && make install \
+    && cd / && rm -rf /valgrind-src
+
+# Sanity: the CLI the broker's valgrind tool drives must be on PATH.
+RUN command -v valgrind && valgrind --version
+
+LABEL org.quarry.toolchain="quarry-triage" \
+      org.quarry.valgrind="valgrind ${VALGRIND_TAG}"
+
+# No ENTRYPOINT: the broker supplies the full argv (valgrind --tool=memcheck … <target>).

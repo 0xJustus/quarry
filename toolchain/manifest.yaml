@@ -1,0 +1,172 @@
+# quarry tool-library manifest (Tool Provisioning + ADR-0004 tier-3).
+#
+# `quarry toolctl populate --manifest bench/toolchain/manifest.yaml --store <dir>` builds
+# each tool from its PINNED source via the recipe Dockerfile, content-addresses the built
+# artifact, and PINS it into the broker's content-addressed store — recording the provenance
+# (source repo + commit -> recipe -> content-hash -> timestamp) next to the pull log. A run
+# then bind-mounts only these pinned hashes read-only, zero network (quarry owns the toolchain).
+#
+# Paths (dockerfile/context) are relative to THIS manifest's directory.
+#
+# PINS ARE INTENTIONALLY EMPTY. This environment cannot run `docker build`, so no real content
+# hash exists yet — and an invented digest defeats the whole point of pinning (see README.md).
+# The operator records the produced `sha256:…` here after the first populate; every later
+# populate then fails closed if a rebuilt artifact does not match. The upstream SOURCE is still
+# pinned (AFL++ tag + commit, base-image digest) so the build itself is reproducible.
+
+tools:
+  # The AFL++/libFuzzer/ASan toolchain image quarry OWNS (bench/toolchain/Dockerfile.quarry-fuzz).
+  # Content-addressed as the whole image tarball (docker save) — the artifact consumed downstream
+  # BY DIGEST as internal/fuzz.BuildSpec's FROM base (README.md pin flow). This is the tier-3
+  # broad, pull-only toolchain, curated once — never a per-run niche install.
+  - name: quarry-fuzz
+    source:
+      repo: https://github.com/AFLplusplus/AFLplusplus
+      ref: v4.21c
+      # The exact commit v4.21c points at. Fill from:
+      #   git ls-remote https://github.com/AFLplusplus/AFLplusplus "refs/tags/v4.21c^{}"
+      commit: "9f6b012fbfc8b79dda83e73a208e429aaf25e7ee"
+    recipe:
+      dockerfile: Dockerfile.quarry-fuzz
+      context: .
+      build_args:
+        # Fill from: docker buildx imagetools inspect ubuntu:24.04 --format '{{.Manifest.Digest}}'
+        BASE_DIGEST: "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
+        LLVM_VERSION: "18"
+        AFLPP_TAG: "v4.21c"
+        AFLPP_COMMIT: "9f6b012fbfc8b79dda83e73a208e429aaf25e7ee"
+      image_tag: quarry-fuzz:latest
+    artifact:
+      mode: image
+      target: /tools/quarry-fuzz.tar
+    pin: "sha256:e6869a443d65b921e72789d1332706be9102579d7dadb0f3a0b9b5a34c939687"
+
+  # The libFuzzer + ASan compiler-rt runtime archive extracted from the SAME toolchain build — a
+  # concrete, mountable, content-addressed artifact a from-source harness build links against
+  # (`-fsanitize=fuzzer`). Same pinned recipe as quarry-fuzz; a distinct pinned file artifact.
+  #
+  # NOTE: the in-image path is LLVM-version + arch specific; confirm it against the resolved
+  # clang-18 layout on the first build (it is the compiler-rt fuzzer archive under the clang lib
+  # dir) rather than trusting this default blindly.
+  - name: libfuzzer-asan
+    source:
+      repo: https://github.com/llvm/llvm-project
+      ref: llvmorg-18
+      # Fill with the exact clang-18 package build the base image resolves (dpkg -s clang-18).
+      commit: "76caf4176cd7877ad5952737d56da6f515ee4602"
+    recipe:
+      dockerfile: Dockerfile.quarry-fuzz
+      context: .
+      build_args:
+        BASE_DIGEST: "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
+        LLVM_VERSION: "18"
+        AFLPP_TAG: "v4.21c"
+        AFLPP_COMMIT: "9f6b012fbfc8b79dda83e73a208e429aaf25e7ee"
+      image_tag: quarry-fuzz:latest
+    artifact:
+      mode: file
+      path: /usr/lib/llvm-18/lib/clang/18/lib/linux/libclang_rt.fuzzer-x86_64.a
+      target: /tools/libclang_rt.fuzzer-x86_64.a
+    pin: "sha256:b2aa76fefa08d40c3696ff5072b7dd7099bffaf056022167cb9808c0f211728c"
+
+  # ---------------------------------------------------------------------------------------
+  # Analysis Tool Image opt-in layers (design/Analysis Tool Image.md). Each is the pinned,
+  # content-addressed image backing one broker profile layer (internal/agent.AnalysisProfiles)
+  # — the same shape as quarry-fuzz: a layer is "provisioned" (its tools become broker-exposed)
+  # exactly when its artifact's hash is recorded here after the first populate. quarry-fuzz
+  # already backs the baseline + fuzzing+ layers; these back static+/triage+/re+/symbolic+.
+  #
+  # SOURCE COMMITS are the 40-zero not-yet-pinned sentinel: this environment has no network to
+  # resolve a tag→commit, and inventing a real-looking hash is dishonest. The recipe guard
+  # treats the sentinel as "resolve + verify on first build" (identical to quarry-fuzz's
+  # AFLPP_COMMIT flow); the operator records the resolved commit here on the first build.
+  # ---------------------------------------------------------------------------------------
+
+  # Static+ — deep static analysis (cppcheck from source + clang-tidy/scan-build from the
+  # pinned LLVM series). The whole layer image, content-addressed; the broker runs cppcheck /
+  # clang-tidy inside it as an opt-in sidecar (design: source-level discovery over symbolic).
+  - name: quarry-static
+    source:
+      repo: https://github.com/danmar/cppcheck
+      ref: "2.16.0"
+      # Fill from: git ls-remote https://github.com/danmar/cppcheck "refs/tags/2.16.0^{}"
+      commit: "0000000000000000000000000000000000000000"
+    recipe:
+      dockerfile: Dockerfile.quarry-static
+      context: .
+      build_args:
+        BASE_DIGEST: "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
+        LLVM_VERSION: "18"
+        CPPCHECK_TAG: "2.16.0"
+        CPPCHECK_COMMIT: "0000000000000000000000000000000000000000"
+      image_tag: quarry-static:latest
+    artifact:
+      mode: image
+      target: /tools/quarry-static.tar
+    pin: ""
+
+  # Triage+ — deterministic crash triage (valgrind/memcheck from source). rr is omitted: it
+  # needs host perf-counter access the air-gapped run posture withholds (see the Dockerfile).
+  - name: quarry-triage
+    source:
+      repo: https://github.com/tklengyel/valgrind
+      ref: "VALGRIND_3_24_0"
+      # Fill from: git ls-remote https://github.com/tklengyel/valgrind "refs/tags/VALGRIND_3_24_0^{}"
+      commit: "0000000000000000000000000000000000000000"
+    recipe:
+      dockerfile: Dockerfile.quarry-triage
+      context: .
+      build_args:
+        BASE_DIGEST: "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
+        VALGRIND_TAG: "VALGRIND_3_24_0"
+        VALGRIND_COMMIT: "0000000000000000000000000000000000000000"
+      image_tag: quarry-triage:latest
+    artifact:
+      mode: image
+      target: /tools/quarry-triage.tar
+    pin: ""
+
+  # RE+ — Ghidra headless (RECIPE STUB: source pinned, heavy Gradle build deferred; see the
+  # Dockerfile). Binary Ninja is commercial/MCP-only and never imaged. Pinned so a full build
+  # is correct-by-construction on operator opt-in.
+  - name: quarry-re
+    source:
+      repo: https://github.com/NationalSecurityAgency/ghidra
+      ref: "Ghidra_11.3_build"
+      # Fill from: git ls-remote https://github.com/NationalSecurityAgency/ghidra "refs/tags/Ghidra_11.3_build^{}"
+      commit: "0000000000000000000000000000000000000000"
+    recipe:
+      dockerfile: Dockerfile.quarry-re
+      context: .
+      build_args:
+        BASE_DIGEST: "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
+        GHIDRA_TAG: "Ghidra_11.3_build"
+        GHIDRA_COMMIT: "0000000000000000000000000000000000000000"
+        JDK_VERSION: "21"
+      image_tag: quarry-re:latest
+    artifact:
+      mode: image
+      target: /tools/quarry-re.tar
+    pin: ""
+
+  # Symbolic+ — angr (RECIPE STUB: source pinned, heavy wheel stack deferred; see the
+  # Dockerfile). KLEE deferred alongside. Pinned so a full build is correct-by-construction on
+  # operator opt-in; the design keeps this strictly opt-in (CMPLOG beats angr for magic gates).
+  - name: quarry-symbolic
+    source:
+      repo: https://github.com/angr/angr
+      ref: "v9.2.145"
+      # Fill from: git ls-remote https://github.com/angr/angr "refs/tags/v9.2.145^{}"
+      commit: "0000000000000000000000000000000000000000"
+    recipe:
+      dockerfile: Dockerfile.quarry-symbolic
+      context: .
+      build_args:
+        BASE_DIGEST: "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
+        ANGR_TAG: "v9.2.145"
+        ANGR_COMMIT: "0000000000000000000000000000000000000000"
+      image_tag: quarry-symbolic:latest
+    artifact:
+      mode: image
+      target: /tools/quarry-symbolic.tar
+    pin: ""

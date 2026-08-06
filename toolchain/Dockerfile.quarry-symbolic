@@ -1,0 +1,48 @@
+# quarry-symbolic: the symbolic/concolic-execution layer quarry OWNS and PINS (Analysis
+# Tool Image "Symbolic+").
+#
+# RECIPE STUB — pinned sources noted, full build deferred. angr is a heavy Python stack
+# (claripy/pyvex/unicorn/z3) the design flags strictly opt-in ("AFL++ CMPLOG over angr for
+# magic-value gates"); it is best as an MCP/RPC sidecar, not a default populate. This recipe
+# pins the exact upstream so a full build is correct-by-construction when opted in; it is NOT
+# on a default populate's hot path. KLEE (the other Symbolic+ tool) needs an LLVM-bitcode
+# build of the target and is deferred alongside angr — noted, not faked.
+#
+# Mirrors Dockerfile.quarry-fuzz pin discipline: base OS by digest, angr by release tag +
+# verified commit; the Python deps are installed from a PINNED requirement (angr==TAG) so the
+# resolved set is reproducible. The produced content hash is recorded by `quarry toolctl
+# populate` (manifest.yaml `pin:`), NOT baked here.
+
+# --- base: pinned Ubuntu 24.04 (noble) ------------------------------------------------------
+ARG BASE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
+FROM ubuntu:24.04@${BASE_DIGEST} AS quarry-symbolic
+
+ENV DEBIAN_FRONTEND=noninteractive
+# angr release tag (angr/angr uses vX.Y.Z tags). The commit the tag points at is the pin that
+# matters; 40 zeros = the not-yet-pinned sentinel resolved on the first build (README.md).
+ARG ANGR_TAG=v9.2.145
+ARG ANGR_COMMIT=0000000000000000000000000000000000000000
+
+# --- symbolic runtime (STUB) ----------------------------------------------------------------
+# Python + git only. Installing the full angr wheel stack (and KLEE's LLVM build) is the heavy
+# step gated behind the operator opt-in (see manifest.yaml symbolic+ entry): NOT run here so a
+# default populate stays lean.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates git python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone the PINNED angr source (verified commit) as the reproducibility anchor; the actual
+# `pip install angr==${ANGR_TAG#v}` into a venv is the deferred step. Documented,
+# correct-by-construction stub rather than a fabricated artifact.
+RUN git clone --depth 1 --branch "${ANGR_TAG}" https://github.com/angr/angr /angr-src \
+    && cd /angr-src \
+    && got="$(git rev-parse HEAD)" \
+    && if [ "${ANGR_COMMIT}" != "0000000000000000000000000000000000000000" ] && [ "${got}" != "${ANGR_COMMIT}" ]; then \
+         echo "angr commit mismatch: tag ${ANGR_TAG} is ${got}, expected ${ANGR_COMMIT}" >&2; exit 1; \
+       fi
+    # TODO(opt-in): python3 -m venv /opt/angr && /opt/angr/bin/pip install "angr==${ANGR_TAG#v}"
+    #   (pulls unicorn/z3/claripy pinned by angr's own constraints) — deferred (heavy).
+
+LABEL org.quarry.toolchain="quarry-symbolic" \
+      org.quarry.angr="angr ${ANGR_TAG} (source-pinned; build deferred)" \
+      org.quarry.stub="true"

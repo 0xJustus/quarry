@@ -1,0 +1,48 @@
+# quarry-re: the RE / decompiler layer quarry OWNS and PINS (Analysis Tool Image "RE+").
+#
+# RECIPE STUB — pinned sources noted, full build deferred. Ghidra headless is a heavy
+# (JDK + multi-hundred-MB release) opt-in sidecar; the design flags it strictly opt-in and
+# best as an MCP sidecar. This recipe pins the exact upstream release so a full build is
+# correct-by-construction when the operator opts in; it is NOT wired into a default populate
+# run's hot path. Binary Ninja (the other RE+ tool) is COMMERCIAL and license-gated — it is
+# surfaced via its MCP sidecar (mcp__binary_ninja_mcp__*), never redistributed in an image.
+#
+# Mirrors Dockerfile.quarry-fuzz pin discipline: base OS by digest, Ghidra by release tag +
+# verified commit of the source tree the release was cut from. The produced content hash is
+# recorded by `quarry toolctl populate` (manifest.yaml `pin:`), NOT baked here.
+
+# --- base: pinned Ubuntu 24.04 (noble) ------------------------------------------------------
+ARG BASE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
+FROM ubuntu:24.04@${BASE_DIGEST} AS quarry-re
+
+ENV DEBIAN_FRONTEND=noninteractive
+# Ghidra release tag (NSA/ghidra uses Ghidra_<ver>_build tags). The commit the tag points at
+# is the pin that matters; 40 zeros = the not-yet-pinned sentinel resolved on the first build.
+ARG GHIDRA_TAG=Ghidra_11.3_build
+ARG GHIDRA_COMMIT=0000000000000000000000000000000000000000
+# Ghidra headless needs a JDK; pin the Temurin/OpenJDK major the release targets.
+ARG JDK_VERSION=21
+
+# --- headless RE runtime (STUB) -------------------------------------------------------------
+# The JDK + git the pinned-source Ghidra build needs. The full Gradle build of Ghidra from
+# source is the heavy step gated behind the operator opt-in (see manifest.yaml re+ entry):
+# it is intentionally NOT run here so a default populate stays lean.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates git \
+      "openjdk-${JDK_VERSION}-jdk-headless" \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone the PINNED Ghidra source (verified commit); the actual Gradle build is the deferred
+# step. Kept as a documented, correct-by-construction stub rather than a fabricated artifact.
+RUN git clone --depth 1 --branch "${GHIDRA_TAG}" https://github.com/NationalSecurityAgency/ghidra /ghidra-src \
+    && cd /ghidra-src \
+    && got="$(git rev-parse HEAD)" \
+    && if [ "${GHIDRA_COMMIT}" != "0000000000000000000000000000000000000000" ] && [ "${got}" != "${GHIDRA_COMMIT}" ]; then \
+         echo "ghidra commit mismatch: tag ${GHIDRA_TAG} is ${got}, expected ${GHIDRA_COMMIT}" >&2; exit 1; \
+       fi
+    # TODO(opt-in): gradle -I gradle/support/fetchDependencies.gradle && gradle buildGhidra
+    #   then install the headless analyzeHeadless launcher — deferred (heavy), pinned above.
+
+LABEL org.quarry.toolchain="quarry-re" \
+      org.quarry.ghidra="ghidra ${GHIDRA_TAG} (source-pinned; build deferred)" \
+      org.quarry.stub="true"

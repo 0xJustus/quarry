@@ -1,0 +1,81 @@
+# quarry-fuzz: the fuzzing toolchain quarry OWNS and PINS.
+#
+# ADR-0004 ("Direct, Don't Craft") + Analysis Tool Image: quarry must not inherit whatever
+# fuzzer a target image happens to bake in. This image is the coverage-guided byte-generator
+# quarry controls end to end — a base with AFL++ (afl-clang-fast / afl-clang-lto, CMPLOG /
+# RedQueen, MOpt), libFuzzer (clang's -fsanitize=fuzzer), and the ASan/UBSan/MSan runtimes —
+# so internal/fuzz can recompile a target's harness from source (see BuildSpec) and fuzz a
+# harness QUARRY instrumented, not the image's baked binary.
+#
+# Everything is version-pinned so a campaign is reproducible: the base OS by digest, LLVM by
+# apt version, AFL++ by git tag + commit. See README.md for the pin/publish procedure and how
+# the produced digest is recorded (it is NOT baked in here — the digest is emitted at build).
+
+# --- base: pinned Ubuntu 24.04 (noble) ------------------------------------------------------
+# Pin by digest at build time (README documents obtaining it). The tag is the human alias; the
+# @sha256 pin is what makes the build reproducible — CI substitutes it via --build-arg.
+ARG BASE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
+FROM ubuntu:24.04@${BASE_DIGEST} AS quarry-fuzz
+
+ENV DEBIAN_FRONTEND=noninteractive
+# LLVM/clang series pinned to the noble default (clang-18). CMPLOG/LTO need the LLVM plugins,
+# so llvm-dev + the lld linker (for afl-clang-lto) are installed alongside clang.
+ARG LLVM_VERSION=18
+ARG AFLPP_TAG=v4.21c
+# The exact AFL++ commit the tag points at, so a moved tag can never silently change the build.
+ARG AFLPP_COMMIT=0000000000000000000000000000000000000000
+
+# --- baseline build + sanitizer toolchain ---------------------------------------------------
+# clang/llvm (afl-clang-fast/-lto backends, libFuzzer, the sanitizer runtimes), lld (LTO
+# linker), plus the build tooling arbitrary targets need (make/cmake/ninja/pkg-config/autotools)
+# and binutils for triage. Kept lean — heavier RE/symbolic tools are opt-in sidecars per the
+# Analysis Tool Image doc, not part of this fuzzing base.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates git build-essential make cmake ninja-build pkg-config \
+      autoconf automake libtool \
+      "clang-${LLVM_VERSION}" "clang-tools-${LLVM_VERSION}" \
+      "llvm-${LLVM_VERSION}" "llvm-${LLVM_VERSION}-dev" "llvm-${LLVM_VERSION}-tools" \
+      "libclang-rt-${LLVM_VERSION}-dev" "lld-${LLVM_VERSION}" \
+      python3 python3-dev \
+      binutils file \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make the pinned clang the default `clang`/`clang++`/`llvm-config`/`ld.lld` so AFL++'s build
+# and afl-clang-lto find the toolchain without version suffixes.
+RUN for t in clang clang++ llvm-config llvm-ar llvm-ranlib ld.lld; do \
+      update-alternatives --install "/usr/bin/$t" "$t" "/usr/bin/$t-${LLVM_VERSION}" 100 || true; \
+    done
+
+# --- AFL++ (pinned by tag + verified commit) ------------------------------------------------
+# Built from source rather than pulled from aflplusplus/aflplusplus:latest, so QUARRY pins the
+# fuzzer version — the whole point of owning the toolchain. LLVM_CONFIG points the LLVM-mode
+# build (afl-clang-fast, CMPLOG, the LTO pass) at the pinned clang.
+RUN git clone --depth 1 --branch "${AFLPP_TAG}" https://github.com/AFLplusplus/AFLplusplus /afl-src \
+    && cd /afl-src \
+    && got="$(git rev-parse HEAD)" \
+    && if [ "${AFLPP_COMMIT}" != "0000000000000000000000000000000000000000" ] && [ "${got}" != "${AFLPP_COMMIT}" ]; then \
+         echo "AFL++ commit mismatch: tag ${AFLPP_TAG} is ${got}, expected ${AFLPP_COMMIT}" >&2; exit 1; \
+       fi \
+    && make distrib LLVM_CONFIG="llvm-config-${LLVM_VERSION}" \
+    && make install \
+    && cd / && rm -rf /afl-src
+
+# --- run-time defaults for containerized fuzzing --------------------------------------------
+# afl-fuzz can't set the host core_pattern from inside a container, and CPU-governor / affinity
+# probes fail under cgroup limits — these let it run cleanly. internal/fuzz sets them too
+# (belt and suspenders); baking them keeps a hand-run of the image honest.
+ENV AFL_SKIP_CPUFREQ=1 \
+    AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+    AFL_NO_AFFINITY=1
+
+# Sanity: the wrappers quarry drives must be on PATH. Fails the build early if a rename upstream
+# breaks the contract internal/fuzz's BuildSpec relies on.
+RUN command -v afl-fuzz && command -v afl-clang-fast && command -v afl-clang-lto \
+    && clang --version | head -1
+
+LABEL org.quarry.toolchain="quarry-fuzz" \
+      org.quarry.afl="AFLplusplus ${AFLPP_TAG}" \
+      org.quarry.llvm="clang-${LLVM_VERSION}"
+
+# No ENTRYPOINT: internal/fuzz supplies the full argv (afl-clang-fast … for instrumentation,
+# afl-fuzz … for a campaign). A downstream target image builds FROM this via BuildSpec.
